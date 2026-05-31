@@ -19,6 +19,9 @@
 #ifndef LIBBITCOIN_SYSTEM_CRYPTO_SECP256K1_HPP
 #define LIBBITCOIN_SYSTEM_CRYPTO_SECP256K1_HPP
 
+#include <span>
+#include <type_traits>
+#include <vector>
 #include <bitcoin/system/data/data.hpp>
 #include <bitcoin/system/define.hpp>
 #include <bitcoin/system/hash/hash.hpp>
@@ -226,21 +229,41 @@ BC_API bool recover_public(ec_uncompressed& out,
 /// Targets IBD/historical block validation, where signatures are ~95% of script
 /// cost. NOT a mempool-latency path.
 
-/// Packed batch record: 32 hash | 33 compressed point | 64 signature.
-static constexpr size_t batch_record_size = 129;
+/// One packed verification record, forwarded from the caller's store (e.g. a
+/// database mmap) with zero copy. Field order is digest | public_key | signature,
+/// then a 3-byte caller identifier the engine never interprets — it is carried
+/// only so a failed row maps back to its source (block/tx) with no side table.
+#pragma pack(push, 1)
+struct triple
+{
+    using token = system::data_array<3>;
+    using tokens = std::vector<token>;
 
-/// Verify a packed batch of ECDSA signatures. Each row is one batch_record_size
-/// record optionally followed by key_size opaque bytes (a caller tag, e.g. a
-/// block/tx id; never interpreted here, pass key_size == 0 to disable). results
-/// is resized to count; results[i] is non-zero iff row i verifies. Returns false
-/// only on malformed input (e.g. rows too short); a structurally-invalid row is
-/// reported as results[i] == 0, not an error.
+    system::hash_digest digest;
+    system::ec_compressed public_key;
+    system::ec_signature signature;
+    token identifier;
+};
+using triples = std::span<const triple>;
+#pragma pack(pop)
+
+static_assert(sizeof(triple) == 132,
+    "ecdsa::triple must be tightly packed (32 + 33 + 64 + 3)");
+static_assert(std::is_standard_layout_v<triple>,
+    "ecdsa::triple must be standard-layout for zero-copy forwarding");
+
+/// Verify a batch of ECDSA signatures. Returns the identifiers of the rows that
+/// FAILED verification — an empty result means every row is valid. A structurally
+/// invalid row (off-curve key, s >= n, R.x >= p, or a signature that simply does
+/// not verify) is reported by its identifier, never by aborting the batch.
+/// The input is a typed span, so malformed input cannot occur; any internal /
+/// device / allocation failure is unrecoverable and std::abort()s rather than
+/// returning, consistent with the library's fail-fast contract.
 ///
 /// Compiled WITH_ULTRAFAST this dispatches to the UltrafastSecp256k1 batch bridge
 /// (GPU when a backend is linked, else its CPU path); otherwise it is a parallel
 /// std::for_each over the singular verify_signature.
-BC_API bool batch_verify(const data_slice& rows, size_t count, size_t key_size,
-    std_vector<uint8_t>& results) NOEXCEPT;
+BC_API triple::tokens batch_verify(triples rows) NOEXCEPT;
 
 } // namespace ecdsa
 
@@ -273,16 +296,32 @@ BC_API bool verify_commitment(const ec_xonly& internal_key,
 /// Schnorr (BIP-340) batch verification (GPU/CPU acceleration bridge)
 /// ---------------------------------------------------------------------------
 
-/// Packed batch record: 32 x-only key | 32 hash | 64 signature.
-/// Note the deliberate field-order difference from ecdsa::batch_record_size:
-/// the hash is the FIRST field for ECDSA and the SECOND for Schnorr.
-static constexpr size_t batch_record_size = 128;
+/// One packed verification record. Uniform field order with ecdsa::triple
+/// (digest | public_key | signature | 3-byte identifier); the x-only public key
+/// is 32 bytes, so the record is one byte shorter than the ECDSA record.
+#pragma pack(push, 1)
+struct triple
+{
+    using token = system::data_array<3>;
+    using tokens = std::vector<token>;
 
-/// Verify a packed batch of Schnorr/BIP-340 signatures. Row layout and result
-/// semantics mirror ecdsa::batch_verify (one batch_record_size record + optional
-/// key_size opaque tail per row; results[i] non-zero iff row i verifies).
-BC_API bool batch_verify(const data_slice& rows, size_t count, size_t key_size,
-    std_vector<uint8_t>& results) NOEXCEPT;
+    system::hash_digest digest;
+    system::ec_xonly public_key;
+    system::ec_signature signature;
+    token identifier;
+};
+using triples = std::span<const triple>;
+#pragma pack(pop)
+
+static_assert(sizeof(triple) == 131,
+    "schnorr::triple must be tightly packed (32 + 32 + 64 + 3)");
+static_assert(std::is_standard_layout_v<triple>,
+    "schnorr::triple must be standard-layout for zero-copy forwarding");
+
+/// Verify a batch of Schnorr/BIP-340 signatures. Result and failure semantics
+/// mirror ecdsa::batch_verify: returns the identifiers of the failed rows (empty
+/// == all valid); malformed/device/allocation failure std::abort()s.
+BC_API triple::tokens batch_verify(triples rows) NOEXCEPT;
 
 } // namespace schnorr
 } // namespace system

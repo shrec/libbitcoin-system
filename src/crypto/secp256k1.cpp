@@ -19,6 +19,7 @@
 #include <bitcoin/system/crypto/secp256k1.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <numeric>
 #include <utility>
 #include <secp256k1.h>
@@ -493,50 +494,56 @@ bool recover_public(ec_uncompressed& out,
 // ECDSA batch verification (GPU/CPU acceleration bridge)
 // ----------------------------------------------------------------------------
 
-bool batch_verify(const data_slice& rows, size_t count, size_t key_size,
-    std_vector<uint8_t>& results) NOEXCEPT
+triple::tokens batch_verify(triples rows) NOEXCEPT
 {
-    results.assign(count, 0u);
+    triple::tokens failed; // normally empty: only failed rows report an identifier
+    const auto count = rows.size();
     if (is_zero(count))
-        return true;
+        return failed;
 
-    const auto stride = batch_record_size + key_size;
-    if (rows.size() < count * stride)
-        return false;
+    // Per-row pass/fail (1/0), optimal for concurrent fill on either path.
+    std_vector<uint8_t> results(count, 0u);
 
 #if defined(WITH_ULTRAFAST)
     // One bridge controller per worker thread: amortizes GPU device init and
     // honors the bridge's "not internally synchronized" contract (libbitcoin
     // verifies across validation threads).
     static thread_local ufsecp::lbtc::Controller control{ UFSECP_LBTC_AUTO };
-    if (!control.ok())
-        return false;
 
-    size_t invalid_count{};
-    return ufsecp_lbtc_verify_ecdsa(control.get(), rows.data(), count, key_size,
-        results.data(), nullptr, 0, &invalid_count) == UFSECP_OK;
+    // A controller that cannot be created (OOM, or no usable backend under a
+    // forced mode) is an unrecoverable condition, not a verdict — fail fast.
+    if (!control.ok())
+        std::abort();
+
+    // Zero-copy: the packed triple span IS the bridge row buffer; the trailing
+    // 3-byte identifier is the opaque per-row tail the engine never interprets.
+    const auto status = ufsecp_lbtc_verify_ecdsa(control.get(),
+        reinterpret_cast<const uint8_t*>(rows.data()), count,
+        sizeof(triple::token), results.data(), nullptr, 0, nullptr);
+
+    // The input is a typed span (a malformed stride is impossible), so a non-OK
+    // return can only be an internal/device fault — also unrecoverable.
+    if (status != UFSECP_OK)
+        std::abort();
 #else
     std_vector<size_t> index(count);
     std::iota(index.begin(), index.end(), size_t{0});
 
     const auto verify_row = [&](size_t row) NOEXCEPT
     {
-        const auto record = std::next(rows.data(), row * stride);
-        hash_digest hash;
-        ec_compressed point;
-        ec_signature signature;
-        std::copy_n(record, hash_size, hash.begin());
-        std::copy_n(std::next(record, hash_size), ec_compressed_size,
-            point.begin());
-        std::copy_n(std::next(record, hash_size + ec_compressed_size),
-            ec_signature_size, signature.begin());
-        results[row] = verify_signature(point, hash, signature) ?
-            uint8_t{1} : uint8_t{0};
+        const auto& record = rows[row];
+        results[row] = verify_signature(record.public_key, record.digest,
+            record.signature) ? uint8_t{1} : uint8_t{0};
     };
 
     std::for_each(std::execution::par, index.begin(), index.end(), verify_row);
-    return true;
 #endif
+
+    for (size_t row = 0; row < count; ++row)
+        if (is_zero(results[row]))
+            failed.push_back(rows[row].identifier);
+
+    return failed;
 }
 
 } // namespace ecdsa
@@ -604,47 +611,48 @@ bool verify_commitment(const ec_xonly& internal_key, const hash_digest& tweak,
 // Schnorr (BIP-340) batch verification (GPU/CPU acceleration bridge)
 // ----------------------------------------------------------------------------
 
-bool batch_verify(const data_slice& rows, size_t count, size_t key_size,
-    std_vector<uint8_t>& results) NOEXCEPT
+triple::tokens batch_verify(triples rows) NOEXCEPT
 {
-    results.assign(count, 0u);
+    triple::tokens failed; // normally empty: only failed rows report an identifier
+    const auto count = rows.size();
     if (is_zero(count))
-        return true;
+        return failed;
 
-    const auto stride = batch_record_size + key_size;
-    if (rows.size() < count * stride)
-        return false;
+    std_vector<uint8_t> results(count, 0u);
 
 #if defined(WITH_ULTRAFAST)
     static thread_local ufsecp::lbtc::Controller control{ UFSECP_LBTC_AUTO };
-    if (!control.ok())
-        return false;
 
-    size_t invalid_count{};
-    return ufsecp_lbtc_verify_schnorr(control.get(), rows.data(), count, key_size,
-        results.data(), nullptr, 0, &invalid_count) == UFSECP_OK;
+    // Unrecoverable controller creation failure (OOM / forced backend) — fail fast.
+    if (!control.ok())
+        std::abort();
+
+    // Zero-copy: digest | x-only key | signature | 3-byte opaque identifier.
+    const auto status = ufsecp_lbtc_verify_schnorr(control.get(),
+        reinterpret_cast<const uint8_t*>(rows.data()), count,
+        sizeof(triple::token), results.data(), nullptr, 0, nullptr);
+
+    if (status != UFSECP_OK)
+        std::abort();
 #else
     std_vector<size_t> index(count);
     std::iota(index.begin(), index.end(), size_t{0});
 
     const auto verify_row = [&](size_t row) NOEXCEPT
     {
-        // Schnorr record order: x-only key | hash | signature.
-        const auto record = std::next(rows.data(), row * stride);
-        ec_xonly key;
-        hash_digest hash;
-        ec_signature signature;
-        std::copy_n(record, ec_xonly_size, key.begin());
-        std::copy_n(std::next(record, ec_xonly_size), hash_size, hash.begin());
-        std::copy_n(std::next(record, ec_xonly_size + hash_size),
-            ec_signature_size, signature.begin());
-        results[row] = verify_signature(key, hash, signature) ?
-            uint8_t{1} : uint8_t{0};
+        const auto& record = rows[row];
+        results[row] = verify_signature(record.public_key, record.digest,
+            record.signature) ? uint8_t{1} : uint8_t{0};
     };
 
     std::for_each(std::execution::par, index.begin(), index.end(), verify_row);
-    return true;
 #endif
+
+    for (size_t row = 0; row < count; ++row)
+        if (is_zero(results[row]))
+            failed.push_back(rows[row].identifier);
+
+    return failed;
 }
 
 } // namespace schnorr

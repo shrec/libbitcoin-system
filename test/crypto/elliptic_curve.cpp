@@ -156,54 +156,46 @@ BOOST_AUTO_TEST_CASE(elliptic_curve__ecdsa_batch_verify__all_valid__expected)
     const std_vector<ec_secret> secrets{ secret1, secret3, one };
     const auto hash = bitcoin_hash(to_chunk("batch-ecdsa"));
 
-    // Pack rows: [32 hash | 33 point | 64 signature], no opaque key column.
-    data_chunk rows;
+    // One packed triple per signature: digest | public_key | signature | id.
+    std_vector<triple> rows;
     for (const auto& secret: secrets)
     {
-        ec_compressed point;
-        BOOST_REQUIRE(secret_to_public(point, secret));
-        ec_signature signature;
-        BOOST_REQUIRE(sign(signature, secret, hash));
-        rows.insert(rows.end(), hash.begin(), hash.end());
-        rows.insert(rows.end(), point.begin(), point.end());
-        rows.insert(rows.end(), signature.begin(), signature.end());
+        triple row{};
+        row.digest = hash;
+        BOOST_REQUIRE(secret_to_public(row.public_key, secret));
+        BOOST_REQUIRE(sign(row.signature, secret, hash));
+        rows.push_back(row);
     }
 
-    std_vector<uint8_t> results;
-    BOOST_REQUIRE(batch_verify(rows, secrets.size(), 0, results));
-    BOOST_REQUIRE_EQUAL(results.size(), secrets.size());
-    for (const auto valid: results)
-        BOOST_REQUIRE_NE(valid, 0u);
+    // An empty failure list means every row verified.
+    BOOST_REQUIRE(batch_verify(rows).empty());
 }
 
-BOOST_AUTO_TEST_CASE(elliptic_curve__ecdsa_batch_verify__one_invalid_with_key__expected)
+BOOST_AUTO_TEST_CASE(elliptic_curve__ecdsa_batch_verify__one_invalid__expected)
 {
     const std_vector<ec_secret> secrets{ secret1, secret3, one, secret1 };
-    const auto hash = bitcoin_hash(to_chunk("batch-ecdsa-key"));
-    constexpr size_t key_size = 3; // 3-byte opaque block id, carried not verified
+    const auto hash = bitcoin_hash(to_chunk("batch-ecdsa-id"));
 
-    data_chunk rows;
+    std_vector<triple> rows;
     for (size_t i = 0; i < secrets.size(); ++i)
     {
-        ec_compressed point;
-        BOOST_REQUIRE(secret_to_public(point, secrets[i]));
-        ec_signature signature;
-        BOOST_REQUIRE(sign(signature, secrets[i], hash));
-        rows.insert(rows.end(), hash.begin(), hash.end());
-        rows.insert(rows.end(), point.begin(), point.end());
-        rows.insert(rows.end(), signature.begin(), signature.end());
-        rows.insert(rows.end(), { static_cast<uint8_t>(i), 0x00, 0x00 });
+        triple row{};
+        row.digest = hash;
+        BOOST_REQUIRE(secret_to_public(row.public_key, secrets[i]));
+        BOOST_REQUIRE(sign(row.signature, secrets[i], hash));
+        // 3-byte identifier = little-endian row index (caller's block/tx tag).
+        row.identifier = { static_cast<uint8_t>(i), 0x00, 0x00 };
+        rows.push_back(row);
     }
 
-    // Corrupt the signature of one row; its opaque key column is untouched.
+    // Corrupt one signature; its identifier is untouched.
     constexpr size_t bad = 2;
-    const auto stride = ecdsa::batch_record_size + key_size;
-    rows[bad * stride + hash_size + ec_compressed_size + 10] ^= 0xff;
+    rows[bad].signature[10] ^= 0xff;
 
-    std_vector<uint8_t> results;
-    BOOST_REQUIRE(batch_verify(rows, secrets.size(), key_size, results));
-    for (size_t i = 0; i < results.size(); ++i)
-        BOOST_REQUIRE_EQUAL((results[i] != 0u), (i != bad));
+    // The failed row is reported by its identifier, never by aborting the batch.
+    const auto failed = batch_verify(rows);
+    BOOST_REQUIRE_EQUAL(failed.size(), 1u);
+    BOOST_REQUIRE(failed.front() == rows[bad].identifier);
 }
 
 BOOST_AUTO_TEST_CASE(elliptic_curve__schnorr_batch_verify__all_valid__expected)
@@ -212,26 +204,20 @@ BOOST_AUTO_TEST_CASE(elliptic_curve__schnorr_batch_verify__all_valid__expected)
     const auto hash = bitcoin_hash(to_chunk("batch-schnorr"));
     const hash_digest auxiliary{};
 
-    // Pack rows: [32 x-only key | 32 hash | 64 signature].
-    data_chunk rows;
+    std_vector<schnorr::triple> rows;
     for (const auto& secret: secrets)
     {
         ec_compressed point;
         BOOST_REQUIRE(secret_to_public(point, secret));
-        ec_xonly xonly;
-        std::copy_n(std::next(point.begin()), ec_xonly_size, xonly.begin());
-        ec_signature signature;
-        BOOST_REQUIRE(schnorr::sign(signature, secret, hash, auxiliary));
-        rows.insert(rows.end(), xonly.begin(), xonly.end());
-        rows.insert(rows.end(), hash.begin(), hash.end());
-        rows.insert(rows.end(), signature.begin(), signature.end());
+        schnorr::triple row{};
+        row.digest = hash;
+        std::copy_n(std::next(point.begin()), ec_xonly_size,
+            row.public_key.begin());
+        BOOST_REQUIRE(schnorr::sign(row.signature, secret, hash, auxiliary));
+        rows.push_back(row);
     }
 
-    std_vector<uint8_t> results;
-    BOOST_REQUIRE(schnorr::batch_verify(rows, secrets.size(), 0, results));
-    BOOST_REQUIRE_EQUAL(results.size(), secrets.size());
-    for (const auto valid: results)
-        BOOST_REQUIRE_NE(valid, 0u);
+    BOOST_REQUIRE(schnorr::batch_verify(rows).empty());
 }
 
 BOOST_AUTO_TEST_CASE(elliptic_curve__schnorr_batch_verify__one_invalid__expected)
@@ -240,29 +226,27 @@ BOOST_AUTO_TEST_CASE(elliptic_curve__schnorr_batch_verify__one_invalid__expected
     const auto hash = bitcoin_hash(to_chunk("batch-schnorr-neg"));
     const hash_digest auxiliary{};
 
-    data_chunk rows;
-    for (const auto& secret: secrets)
+    std_vector<schnorr::triple> rows;
+    for (size_t i = 0; i < secrets.size(); ++i)
     {
         ec_compressed point;
-        BOOST_REQUIRE(secret_to_public(point, secret));
-        ec_xonly xonly;
-        std::copy_n(std::next(point.begin()), ec_xonly_size, xonly.begin());
-        ec_signature signature;
-        BOOST_REQUIRE(schnorr::sign(signature, secret, hash, auxiliary));
-        rows.insert(rows.end(), xonly.begin(), xonly.end());
-        rows.insert(rows.end(), hash.begin(), hash.end());
-        rows.insert(rows.end(), signature.begin(), signature.end());
+        BOOST_REQUIRE(secret_to_public(point, secrets[i]));
+        schnorr::triple row{};
+        row.digest = hash;
+        std::copy_n(std::next(point.begin()), ec_xonly_size,
+            row.public_key.begin());
+        BOOST_REQUIRE(schnorr::sign(row.signature, secrets[i], hash, auxiliary));
+        row.identifier = { static_cast<uint8_t>(i), 0x00, 0x00 };
+        rows.push_back(row);
     }
 
     // Corrupt one signature.
     constexpr size_t bad = 1;
-    const auto stride = schnorr::batch_record_size;
-    rows[bad * stride + ec_xonly_size + hash_size + 10] ^= 0xff;
+    rows[bad].signature[10] ^= 0xff;
 
-    std_vector<uint8_t> results;
-    BOOST_REQUIRE(schnorr::batch_verify(rows, secrets.size(), 0, results));
-    for (size_t i = 0; i < results.size(); ++i)
-        BOOST_REQUIRE_EQUAL((results[i] != 0u), (i != bad));
+    const auto failed = schnorr::batch_verify(rows);
+    BOOST_REQUIRE_EQUAL(failed.size(), 1u);
+    BOOST_REQUIRE(failed.front() == rows[bad].identifier);
 }
 
 // addition
