@@ -24,7 +24,10 @@
 #include <shared_mutex>
 #include <span>
 #if defined(HAVE_ULTRAFAST)
-    #include <ufsecp_libbitcoin.h>
+    // Direct C++ integration: no C-ABI bridge, no shim, no FFI. The libbitcoin
+    // batch's column spans (digests/points/signatures) are handed straight to
+    // the engine (secp256k1::*) inline.
+    #include <ufsecp/libbitcoin.hpp>
 #endif
 #include <bitcoin/system/chain/chain.hpp>
 #include <bitcoin/system/crypto/secp256k1.hpp>
@@ -70,40 +73,29 @@ inline bool verify_signature(const schnorr::batch& ) NOEXCEPT
 template <typename Batch>
 data_chunk batch_verify(const stopper& cancel, const Batch& batch) NOEXCEPT
 {
-    ////// OOM is unrecoverable.
-    ////static thread_local ufsecp::lbtc::Controller context{};
-    ////if (!context.ok()) std::abort();
-    ////
-    ////// set up cancellation callback.
-    ////const ufsecp_cancel_fn callback = [](const void* atomic) NOEXCEPT
-    ////{
-    ////    constexpr auto relaxed = std::memory_order_relaxed;
-    ////    return to_int(pointer_cast<const stopper>(atomic)->load(relaxed));
-    ////};
-    ////
-    ////const auto count = batch.size();
-    ////data_chunk results(count);
-    ////const auto out = results.data();
-    ////const auto in = pointer_cast<const uint8_t>(batch.data());
-    ////const ufsecp_cancel_token token{ callback, &cancel, 0 };
-    ////
-    ////if constexpr (is_same_type<Batch, schnorr::batch>)
-    ////{
-    ////    constexpr auto extra_size = sizeof(Batch) - (sizeof(hash_digest) +
-    ////        sizeof(ec_xonly) + sizeof(ec_signature));
-    ////    ufsecp_lbtc_verify_schnorr_mt(context.get(), in, count, extra_size,
-    ////        out, nullptr, 0, nullptr, 0, &token);
-    ////}
-    ////else
-    ////{
-    ////    constexpr auto extra_size = sizeof(Batch) - (sizeof(hash_digest) +
-    ////        sizeof(ec_compressed) + sizeof(ec_signature));
-    ////    ufsecp_lbtc_verify_ecdsa_opaque_mt(context.get(), in, count, extra_size,
-    ////        out, nullptr, 0, nullptr, 0, &token);
-    ////}
-    ////
-    ////return results;
-    return {};
+    // Column spans (Structure-of-Arrays) map straight to the engine, zero-copy.
+    // digests[count][32], points[count][33|32], signatures[count][64].
+    // ec_signature aliases secp256k1_ecdsa_signature (raw scalar limbs LE) ==
+    // the engine's opaque form; the Schnorr sig is BIP-340. Result is bit-
+    // identical to the (now-removed) C bridge; verify is variable-time (public).
+    const auto count = batch.digests.size();
+    data_chunk results(count);
+    const auto out = results.data();
+    const auto digests = pointer_cast<const uint8_t>(batch.digests.data());
+    const auto points = pointer_cast<const uint8_t>(batch.points.data());
+    const auto sigs = pointer_cast<const uint8_t>(batch.signatures.data());
+
+    if constexpr (is_same_type<Batch, schnorr::batch>)
+        ufsecp::lbtc::schnorr_verify_columns(digests, points, sigs, count, out,
+            0 /*max_threads: auto*/);
+    else
+        ufsecp::lbtc::ecdsa_verify_columns(digests, points, sigs, count, out,
+            0 /*max_threads: auto*/);
+
+    // TODO(direct-integration): fine-grained cancellation hook into
+    // ufsecp::lbtc::*_verify_columns (coarse between-chunk cancel preserved).
+    (void)cancel;
+    return results;
 }
 
 #else
