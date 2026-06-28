@@ -80,6 +80,13 @@ option( with-secp256k1 "Use bitcoin-core/secp256k1." ON )
 option( with-tests "Build tests." ON )
 option( with-examples "Build examples." ON )
 
+# Honor -DHAVE_ULTRAFAST=ON (direct UltrafastSecp256k1 engine integration).
+# This selects the bridge-free direct C++ surface; the real libsecp256k1
+# dependency remains for the not-yet-migrated cold paths (mixed state).
+if ( HAVE_ULTRAFAST )
+  set( with-ultrafast ON )
+endif()
+
 #------------------------------------------------------------------------------
 # Dependencies.
 #------------------------------------------------------------------------------
@@ -332,7 +339,7 @@ target_link_libraries( libbitcoin-system
     Boost::thread
     Boost::url
     $<$<BOOL:${with-secp256k1}>:libsecp256k1::secp256k1>
-    $<$<BOOL:${with-ultrafast}>:secp256k1::fastsecp256k1>
+    $<$<BOOL:${with-ultrafast}>:secp256k1::fastsecp256k1_libbitcoin>
 )
 
 set_target_properties( libbitcoin-system

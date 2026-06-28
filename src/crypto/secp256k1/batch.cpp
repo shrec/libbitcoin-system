@@ -86,11 +86,11 @@ data_chunk batch_verify(const stopper& cancel, const Batch& batch) NOEXCEPT
     const auto sigs = pointer_cast<const uint8_t>(batch.signatures.data());
 
     if constexpr (is_same_type<Batch, schnorr::batch>)
-        ufsecp::lbtc::schnorr_verify_columns(digests, points, sigs, count, out,
-            0 /*max_threads: auto*/);
+        static_cast<void>(ufsecp::lbtc::schnorr_verify_columns(digests, points, sigs, count, out,
+            0 /*max_threads: auto*/));
     else
-        ufsecp::lbtc::ecdsa_verify_columns(digests, points, sigs, count, out,
-            0 /*max_threads: auto*/);
+        static_cast<void>(ufsecp::lbtc::ecdsa_verify_columns(digests, points, sigs, count, out,
+            0 /*max_threads: auto*/));
 
     // TODO(direct-integration): fine-grained cancellation hook into
     // ufsecp::lbtc::*_verify_columns (coarse between-chunk cancel preserved).
@@ -358,7 +358,7 @@ links_t schnorr::batch::verify(const stopper& cancel,
 #if defined(HAVE_ULTRAFAST)
 
 void silent::batch::scan(const stopper& , const batch& ,
-    const ec_secret& , const handler& ) NOEXCEPT
+    const ec_secret& , const handler& , bool ) NOEXCEPT
 {
     // TODO: iterate over chunked subsets or entire set.
     // TODO: correlate matches to tx link column and invoke callback.

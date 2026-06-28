@@ -36,6 +36,29 @@ $ sudo ldconfig
 ```
 A minimal libbitcoin build requires boost and libsecp256k1. The [libbitcoin/secp256k1](https://github.com/libbitcoin/secp256k1) repository is forked from [bitcoin-core/secp256k1](https://github.com/bitcoin-core/secp256k1) in order to control for changes and to incorporate the necessary Visual Studio build. The original repository can be used directly but recent changes to the public interface may cause build breaks. The `--enable-module-recovery` switch is required.
 
+### UltrafastSecp256k1 (direct engine)
+
+The CMake build can optionally accelerate signature verification with the
+[shrec/UltrafastSecp256k1](https://github.com/shrec/UltrafastSecp256k1) engine. Enable
+it with `-DHAVE_ULTRAFAST=ON` (equivalently `-Dwith-ultrafast=ON`):
+
+```sh
+$ cmake -DHAVE_ULTRAFAST=ON -DCMAKE_PREFIX_PATH=<ultrafast-prefix> ...
+```
+
+This links the single direct target `secp256k1::fastsecp256k1_libbitcoin` from the
+`secp256k1-fast` package — there is no shim, no C ABI, and no bridge. The verify paths
+call `ufsecp::lbtc::*` inline; linking the target also supplies the `<ufsecp/libbitcoin.hpp>`
+include directory and the `HAVE_ULTRAFAST` compile definition to the library's sources.
+
+Point CMake at the installed UltrafastSecp256k1 prefix via
+`-DCMAKE_PREFIX_PATH=<prefix>` (UltrafastSecp256k1 must be built and installed with
+`-DSECP256K1_BUILD_LIBBITCOIN=ON`).
+
+This is a mixed build: only verify is migrated. The real `libsecp256k1` package still
+provides the not-yet-migrated cold paths (sign/keys/math/recover), so keep the
+`with-secp256k1` dependency available (it remains `ON` by default).
+
 ### Debian/Ubuntu
 
 Libbitcoin requires a C++11 compiler, currently minimum [GCC 4.8.0](https://gcc.gnu.org/projects/cxx0x.html) or Clang based on [LLVM 3.5](http://llvm.org/releases/3.5.0/docs/ReleaseNotes.html).

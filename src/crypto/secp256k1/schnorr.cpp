@@ -20,6 +20,10 @@
 
 #include <secp256k1.h>
 #include <secp256k1_schnorrsig.h>
+#if defined(HAVE_ULTRAFAST)
+    // Direct C++ integration: route single verify through the engine inline.
+    #include <ufsecp/libbitcoin.hpp>
+#endif
 #include <bitcoin/system/data/data.hpp>
 #include <bitcoin/system/hash/hash.hpp>
 #include <bitcoin/system/math/math.hpp>
@@ -66,14 +70,19 @@ bool verify_signature(const data_chunk& x_point, const hash_digest& hash,
 bool verify_signature(const ec_xonly& x_point, const hash_digest& hash,
     const ec_signature& signature) NOEXCEPT
 {
+#if defined(HAVE_ULTRAFAST)
+    return ufsecp::lbtc::schnorr_verify(x_point.data(), hash.data(),
+        signature.data());
+#else
     secp256k1_xonly_pubkey pubkey;
     const auto context = ec_context_verify::context();
 
     return
         secp256k1_xonly_pubkey_parse(context, &pubkey, x_point.data()) ==
-            ec_success && 
+            ec_success &&
         secp256k1_schnorrsig_verify(context, signature.data(), hash.data(),
             hash_size, &pubkey) == ec_success;
+#endif
 }
 
 // BIP341: If q != x(Q) or c[0] & 1 != y(Q) mod 2, fail.

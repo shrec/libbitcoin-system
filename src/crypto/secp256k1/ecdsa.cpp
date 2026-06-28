@@ -20,6 +20,10 @@
 
 #include <algorithm>
 #include <secp256k1.h>
+#if defined(HAVE_ULTRAFAST)
+    // Direct C++ integration: route single verify through the engine inline.
+    #include <ufsecp/libbitcoin.hpp>
+#endif
 #include <bitcoin/system/crypto/der_parser.hpp>
 #include <bitcoin/system/data/data.hpp>
 #include <bitcoin/system/hash/hash.hpp>
@@ -159,6 +163,15 @@ bool sign(ec_signature& out, const ec_secret& secret,
 bool verify_signature(const data_chunk& point, const hash_digest& hash,
     const ec_signature& signature) NOEXCEPT
 {
+#if defined(HAVE_ULTRAFAST)
+    // The direct engine only accepts 33-byte compressed keys. Uncompressed
+    // (65-byte) keys fall through to the libsecp path below.
+    if (point.size() == ec_compressed_size &&
+        (point.front() == ec_even_sign || point.front() == ec_odd_sign))
+        return ufsecp::lbtc::ecdsa_verify(point.data(), hash.data(),
+            signature.data());
+#endif
+
     const auto context = ec_context_verify::context();
 
     secp256k1_pubkey pubkey;
@@ -171,11 +184,16 @@ bool verify_signature(const data_chunk& point, const hash_digest& hash,
 bool verify_signature(const ec_compressed& compressed,
     const hash_digest& hash, const ec_signature& signature) NOEXCEPT
 {
+#if defined(HAVE_ULTRAFAST)
+    return ufsecp::lbtc::ecdsa_verify(compressed.data(), hash.data(),
+        signature.data());
+#else
     const auto context = ec_context_verify::context();
 
     secp256k1_pubkey pubkey;
     return ec_public_key_parse(context, pubkey, compressed) &&
         verify_signature(context, pubkey, hash, signature);
+#endif
 }
 
 } // namespace ecdsa
