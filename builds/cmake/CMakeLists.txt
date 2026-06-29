@@ -81,10 +81,21 @@ option( with-tests "Build tests." ON )
 option( with-examples "Build examples." ON )
 
 # Honor -DHAVE_ULTRAFAST=ON (direct UltrafastSecp256k1 engine integration).
-# This selects the bridge-free direct C++ surface; the real libsecp256k1
-# dependency remains for the not-yet-migrated cold paths (mixed state).
+# The ON path is a SINGLE PACKAGE: it consumes only
+# secp256k1::fastsecp256k1_libbitcoin (header-only <ufsecp/libbitcoin.hpp> plus
+# the engine public C++ API). That INTERFACE target carries the HAVE_ULTRAFAST
+# compile definition, the include dirs, and the engine link, so no manual
+# target_compile_definitions is needed here. There is NO shim/bridge/C-ABI.
+#
+# ON mode does NOT find_package or link libsecp256k1: with-secp256k1 is forced
+# OFF below. Every secp256k1 C-API call in the crypto sources is compiled out
+# under HAVE_ULTRAFAST, and the only out-of-tree libsecp256k1 consumer
+# (src/crypto/der_parser.cpp) is excluded from the ON build — decode_signature
+# uses an inline pure-C++ lax DER parser instead. libsecp256k1 is used only by
+# the HAVE_ULTRAFAST=OFF fallback build.
 if ( HAVE_ULTRAFAST )
   set( with-ultrafast ON )
+  set( with-secp256k1 OFF )
 endif()
 
 #------------------------------------------------------------------------------
@@ -114,7 +125,25 @@ find_package( Boost 1.86.0 REQUIRED
 )
 
 if ( with-secp256k1 )
-  find_package( libsecp256k1 0.7.0 REQUIRED )
+  # HAVE_ULTRAFAST=OFF fallback: secp256k1 surfaces are served by
+  # bitcoin-core/libsecp256k1 (CMake package "libsecp256k1"). Resolve it
+  # deterministically — a successful find proceeds to the pure libsecp256k1
+  # build; a miss fails configure with an explicit, actionable diagnostic that
+  # names the package and the exact variable/path the developer must set,
+  # instead of CMake's generic "could not find a package configuration file".
+  find_package( libsecp256k1 0.7.0 QUIET CONFIG )
+  if ( NOT libsecp256k1_FOUND )
+    message( FATAL_ERROR
+      "HAVE_ULTRAFAST=OFF fallback requires the bitcoin-core/libsecp256k1 CMake "
+      "package (libsecp256k1 >= 0.7.0), which was NOT found on this machine.\n"
+      "Install libsecp256k1 with its CMake config export, then point this build "
+      "at it by setting ONE of (absolute paths):\n"
+      "  -Dlibsecp256k1_DIR=<prefix>/lib/cmake/libsecp256k1\n"
+      "  -DCMAKE_PREFIX_PATH=<prefix>   (where <prefix> contains "
+      "lib/cmake/libsecp256k1/libsecp256k1-config.cmake)\n"
+      "Or build the single-package UltrafastSecp256k1 engine path instead with "
+      "-DHAVE_ULTRAFAST=ON, which has no libsecp256k1 dependency." )
+  endif()
 endif()
 
 if ( with-ultrafast )
@@ -312,6 +341,16 @@ file( GLOB_RECURSE libbitcoin_system_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/*.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../src/*.cpp"
 )
+
+# HAVE_ULTRAFAST single-package ON path: src/crypto/der_parser.cpp is the only
+# source outside src/crypto/secp256k1/ that consumes the libsecp256k1 C-API
+# (lax pre-BIP66 DER parse). The engine exposes no DER parser (missing entrypoint),
+# so the ON build excludes der_parser.cpp and ecdsa::decode_signature uses an
+# inline pure-C++ lax DER parser. The OFF fallback build keeps it.
+if ( with-ultrafast )
+  list( REMOVE_ITEM libbitcoin_system_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/crypto/der_parser.cpp" )
+endif()
 
 target_sources( libbitcoin-system
   PUBLIC

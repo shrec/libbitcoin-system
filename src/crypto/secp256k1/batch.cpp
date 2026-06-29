@@ -165,6 +165,20 @@ bool ecdsa::batch::meets_threshold(uint8_t signatures, uint8_t keys,
 links_t ecdsa::batch::get_failures(const stopper& ,
     const data_chunk& , const batch& ) NOEXCEPT
 {
+    // HAVE_ULTRAFAST: per-row verdicts come from evaluate() (engine, real). The
+    // verify()->correlate()->get_failures() link-correlation pass is NOT YET
+    // IMPLEMENTED upstream (batch row metadata design unfinished). evaluate()
+    // row results are authoritative; verify() returns no link ids.
+    // Blocked function: ecdsa::batch::get_failures.
+    //
+    // Why not just un-comment: the commented body below indexes the batch
+    // directly (in[index].id / .group / .pair and in.size()) against an OLD
+    // design where `batch` was row-indexable. The current struct (see
+    // secp256k1_batch.hpp) carries no operator[] and no size(); per-row link
+    // metadata lives on the separate `correlate_t` span (in.correlates[i].id /
+    // .group / .pair). Wiring this correctly (and defining how verify() maps the
+    // out[] verdict buffer to correlate rows + groups) is the unfinished design
+    // decision, so the body is left stubbed pending the upstream metadata model.
     ////BC_ASSERT(out.size() == in.size());
     ////
     ////size_t group{};
@@ -247,6 +261,21 @@ bool schnorr::batch::meets_threshold(uint8_t category, size_t successes,
 links_t schnorr::batch::get_failures(const stopper& ,
     const data_chunk& , const batch& ) NOEXCEPT
 {
+    // HAVE_ULTRAFAST: per-row verdicts come from evaluate() (engine, real). The
+    // verify()->correlate()->get_failures() link-correlation pass is NOT YET
+    // IMPLEMENTED upstream (batch row metadata design unfinished). evaluate()
+    // row results are authoritative; verify() returns no link ids.
+    // Blocked function: schnorr::batch::get_failures.
+    //
+    // Why not just un-comment: the commented body below indexes the batch
+    // directly (in[index].id / .group and in[first].pair / .category, plus
+    // in.size()) against an OLD design where `batch` was row-indexable. The
+    // current struct (see secp256k1_batch.hpp) carries no operator[] and no
+    // size(); per-row threshold metadata lives on the separate `correlate_t`
+    // span (in.correlates[i].category / .pair / .group / .id). Wiring this
+    // correctly (and defining how verify() maps the out[] verdict buffer to
+    // correlate rows + groups) is the unfinished design decision, so the body
+    // is left stubbed pending the upstream metadata model.
     ////BC_ASSERT(out.size() == in.size());
     ////
     ////size_t group{};

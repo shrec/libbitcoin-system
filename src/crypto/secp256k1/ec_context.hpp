@@ -19,8 +19,15 @@
 #ifndef LIBBITCOIN_SYSTEM_CRYPTO_SECP256K1_EC_CONTEXT_HPP
 #define LIBBITCOIN_SYSTEM_CRYPTO_SECP256K1_EC_CONTEXT_HPP
 
-#include <secp256k1.h>
 #include <bitcoin/system/define.hpp>
+
+// HAVE_ULTRAFAST single-package ON path: the secp256k1_context singletons wrap
+// the libsecp256k1 C-API and back only the OFF fallback paths. In ON mode the
+// engine is contextless and nothing calls ec_context_sign/verify::context(), so
+// these declarations (and the <secp256k1.h> include) are compiled out — the ON
+// build links no libsecp256k1 and has no <secp256k1.h> on its include path.
+#if !defined(HAVE_ULTRAFAST)
+#include <secp256k1.h>
 
 namespace libbitcoin {
 namespace system {
@@ -69,5 +76,6 @@ protected:
 
 } // namespace system
 } // namespace libbitcoin
+#endif // !HAVE_ULTRAFAST
 
 #endif

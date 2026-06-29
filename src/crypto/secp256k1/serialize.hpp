@@ -21,8 +21,15 @@
 
 #include <bitcoin/system/crypto/secp256k1.hpp>
 
-#include <secp256k1.h>
 #include <bitcoin/system/data/data.hpp>
+
+// HAVE_ULTRAFAST single-package ON path: these helpers wrap the libsecp256k1
+// C-API (secp256k1_pubkey parse/serialize) and are used only by the OFF
+// fallback paths. In ON mode the crypto sources route through the engine and
+// never call them, so the libsecp256k1 include + helpers are compiled out (the
+// ON build links no libsecp256k1 and has no <secp256k1.h> on its include path).
+#if !defined(HAVE_ULTRAFAST)
+#include <secp256k1.h>
 #include "ec_context.hpp"
 
 namespace libbitcoin {
@@ -53,5 +60,6 @@ inline bool ec_public_key_serialize(const secp256k1_context* context,
 
 } // namespace system
 } // namespace libbitcoin
+#endif // !HAVE_ULTRAFAST
 
 #endif

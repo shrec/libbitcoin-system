@@ -18,6 +18,12 @@
  */
 #include "ec_context.hpp"
 
+// HAVE_ULTRAFAST single-package ON path: the secp256k1_context singletons back
+// only the OFF fallback paths. In ON mode the engine is contextless and nothing
+// references these symbols, so the whole translation unit compiles to nothing
+// (the ON build links no libsecp256k1 and has no <secp256k1.h> on its path).
+#if !defined(HAVE_ULTRAFAST)
+
 #include <secp256k1.h>
 #include <bitcoin/system/define.hpp>
 
@@ -73,3 +79,5 @@ const secp256k1_context* ec_context_verify::context() NOEXCEPT
 
 } // namespace system
 } // namespace libbitcoin
+
+#endif // !HAVE_ULTRAFAST

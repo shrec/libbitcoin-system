@@ -36,28 +36,104 @@ $ sudo ldconfig
 ```
 A minimal libbitcoin build requires boost and libsecp256k1. The [libbitcoin/secp256k1](https://github.com/libbitcoin/secp256k1) repository is forked from [bitcoin-core/secp256k1](https://github.com/bitcoin-core/secp256k1) in order to control for changes and to incorporate the necessary Visual Studio build. The original repository can be used directly but recent changes to the public interface may cause build breaks. The `--enable-module-recovery` switch is required.
 
-### UltrafastSecp256k1 (direct engine)
+### UltrafastSecp256k1 direct engine (HAVE_ULTRAFAST)
 
-The CMake build can optionally accelerate signature verification with the
-[shrec/UltrafastSecp256k1](https://github.com/shrec/UltrafastSecp256k1) engine. Enable
-it with `-DHAVE_ULTRAFAST=ON` (equivalently `-Dwith-ultrafast=ON`):
+The CMake build can optionally route libbitcoin's secp256k1 surfaces through the
+[shrec/UltrafastSecp256k1](https://github.com/shrec/UltrafastSecp256k1) C++ engine,
+called inline and zero-copy via `ufsecp::lbtc::*` through the header-only
+`<ufsecp/libbitcoin.hpp>` interface — there is no shim, no bridge, and no
+ufsecp C-ABI anywhere in this path.
+
+**Single-package switch.** `-DHAVE_ULTRAFAST=ON` is a clean one-flag, one-package
+integrator switch. In ON mode libbitcoin-system links **only**
+`secp256k1::fastsecp256k1_libbitcoin` — it does **not** `find_package` or link
+`libsecp256k1` at all, and CMake forces `with-secp256k1 OFF`. The
+`secp256k1::fastsecp256k1_libbitcoin` INTERFACE target itself carries the
+`HAVE_ULTRAFAST` compile definition, the `<ufsecp/libbitcoin.hpp>` include dirs, and the
+engine link, so no manual flags are needed. Point it at the installed engine prefix with
+`-DCMAKE_PREFIX_PATH=<repo>/libs/UltrafastSecp256k1/out/lbtc-engine-package-graph-minimal-prefix`.
+
+**ON mode: every secp256k1 surface is engine-backed (no libsecp256k1).** With
+`HAVE_ULTRAFAST=ON`, all of the following route exclusively through the
+UltrafastSecp256k1 engine — there is no libsecp256k1 in the link or the call graph:
+
+| Operation | Engine path |
+|---|---|
+| ECDSA single + batch verify | UltrafastSecp256k1 (variable-time) |
+| Schnorr (BIP-340) single + batch verify | UltrafastSecp256k1 (variable-time) |
+| `ecdsa::sign` (RFC6979) / hedged-capable / `ecdsa::sign_recoverable` | UltrafastSecp256k1 (constant-time) |
+| `ecdsa::recover_public` — compressed **and** uncompressed | UltrafastSecp256k1 (variable-time) |
+| ECDSA signature: normalize (low-S), serialize-compact, serialize-DER | UltrafastSecp256k1 |
+| pubkey: create-from-secret (CT), parse, serialize, compress, decompress, combine/sum, negate, tweak_add, tweak_mul — compressed **and** uncompressed (via the engine's `fast::Point`) | UltrafastSecp256k1 |
+| seckey: verify, negate, tweak_add, tweak_mul (CT) — secret add/negate use the engine's mod-n `fast::Scalar` to preserve libbitcoin's zero-tolerant `ec_scalar` semantics | UltrafastSecp256k1 |
+| Schnorr keypair / `schnorr::sign` / `schnorr::verify` | UltrafastSecp256k1 |
+| Taproot `schnorr::verify_commitment` — raw x-only tweak check on the engine's `Point` API | UltrafastSecp256k1 |
+
+**CT vs variable-time.** All secret-bearing paths — signing (`ecdsa::sign`,
+`schnorr::sign`, `ecdsa::sign_recoverable`), pubkey-from-secret keygen, and seckey
+`tweak_mul` — route through the engine's constant-time `ct::*` primitives. Secret
+add/negate (`ec_add`/`ec_negate` on a secret) use the engine's mod-n `fast::Scalar`
+arithmetic to faithfully model libbitcoin's zero-tolerant `ec_scalar` semantics
+(`x + 0 == x`, `x - 0 == x`). All verify paths are variable-time because every input
+(pubkey, signature, message hash) is public; this is correct by design, exactly as
+libsecp256k1 does for verify.
+
+**Two honestly-documented non-"direct" items (still no libsecp256k1 in ON mode).**
+The engine exposes no entrypoint for these, so they are handled in the consumer:
+- **`ecdsa::decode_signature` (lax / pre-BIP66 DER parse)** — the engine has no DER
+  parser, only a strict compact parse. In ON mode this is served by an **inline pure-C++
+  lax DER parser inside the consumer** — no libsecp256k1, no shim. The out-of-tree
+  `src/crypto/der_parser.cpp` (which would need the libsecp256k1 C-API) is **excluded
+  from the ON build**.
+- **Batch link correlation** — `batch::evaluate()` returns real per-row engine verdicts
+  (`1`=valid, `0`=invalid, fail-closed). `batch::verify()` calls
+  `correlate()`/`get_failures()` to map failing rows to link ids, but that correlation
+  pass is **not yet implemented upstream** (returns `{}` in all modes — ON and OFF alike).
+  The blocked functions are `ecdsa::batch::get_failures` and
+  `schnorr::batch::get_failures`; tests therefore assert on `evaluate()` row verdicts,
+  not on `verify()` links.
+
+#### OFF mode (`-DHAVE_ULTRAFAST=OFF`) — pure libsecp256k1 fallback
+
+This is the default. In OFF mode `with-secp256k1` stays ON and libbitcoin links
+**only** `libsecp256k1::secp256k1` (C-API) for every secp256k1 surface — the engine
+is not used at all. The libsecp256k1 package is required **only** for this fallback
+build, never as a parallel link in ON mode.
+
+**Dependency (required for OFF only).** The fallback build needs the
+bitcoin-core/libsecp256k1 CMake package (`libsecp256k1` >= 0.7.0) installed with its
+CMake config export. Point CMake at it by setting **one** of these (absolute paths):
+
+- `-Dlibsecp256k1_DIR=<prefix>/lib/cmake/libsecp256k1`
+- `-DCMAKE_PREFIX_PATH=<prefix>` — where `<prefix>` contains
+  `lib/cmake/libsecp256k1/libsecp256k1-config.cmake`
+
+Resolution is **deterministic**: if the package is found, configure proceeds to a
+pure libsecp256k1 build; if it is missing (or older than 0.7.0), configure **fails
+immediately** with an explicit diagnostic that names the missing `libsecp256k1`
+package and the exact variable/path to set — it does not fall back to the engine and
+does not emit CMake's generic "could not find a package configuration file" message.
+If you do not have libsecp256k1 installed, use the single-package
+`-DHAVE_ULTRAFAST=ON` engine path instead (no libsecp256k1 dependency).
+
+#### Build commands (verified locally)
 
 ```sh
-$ cmake -DHAVE_ULTRAFAST=ON -DCMAKE_PREFIX_PATH=<ultrafast-prefix> ...
+# Direct engine, SINGLE PACKAGE (HAVE_ULTRAFAST=ON) — engine prefix only, no libsecp256k1
+cmake -S libbitcoin-system/builds/cmake -B <build> -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DHAVE_ULTRAFAST=ON -DBoost_DIR=/home/shrek/lbtc-prefix/lib/cmake/Boost-1.86.0 \
+  -DCMAKE_PREFIX_PATH=$PWD/libs/UltrafastSecp256k1/out/lbtc-engine-package-graph-minimal-prefix
+cmake --build <build> -j && ctest --test-dir <build> --output-on-failure
+
+# Fallback, libsecp256k1 only (HAVE_ULTRAFAST=OFF)
+cmake -S libbitcoin-system/builds/cmake -B <build-fb> -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DHAVE_ULTRAFAST=OFF -DBoost_DIR=/home/shrek/lbtc-prefix/lib/cmake/Boost-1.86.0 \
+  -DCMAKE_PREFIX_PATH=<prefix-providing-libsecp256k1>
+cmake --build <build-fb> -j && ctest --test-dir <build-fb> --output-on-failure
 ```
 
-This links the single direct target `secp256k1::fastsecp256k1_libbitcoin` from the
-`secp256k1-fast` package — there is no shim, no C ABI, and no bridge. The verify paths
-call `ufsecp::lbtc::*` inline; linking the target also supplies the `<ufsecp/libbitcoin.hpp>`
-include directory and the `HAVE_ULTRAFAST` compile definition to the library's sources.
-
-Point CMake at the installed UltrafastSecp256k1 prefix via
-`-DCMAKE_PREFIX_PATH=<prefix>` (UltrafastSecp256k1 must be built and installed with
-`-DSECP256K1_BUILD_LIBBITCOIN=ON`).
-
-This is a mixed build: only verify is migrated. The real `libsecp256k1` package still
-provides the not-yet-migrated cold paths (sign/keys/math/recover), so keep the
-`with-secp256k1` dependency available (it remains `ON` by default).
+ON uses only the engine package and never links libsecp256k1; OFF is a pure
+libsecp256k1 build.
 
 ### Debian/Ubuntu
 

@@ -20,6 +20,18 @@
 
 BOOST_AUTO_TEST_SUITE(secp256k1_tests)
 
+// ECDSA single verify (sign+verify roundtrip).
+// ----------------------------------------------------------------------------
+// Under HAVE_ULTRAFAST, ecdsa::verify_signature() routes to the
+// UltrafastSecp256k1 direct engine (ufsecp::lbtc::ecdsa_verify) for compressed
+// keys; otherwise it routes to the libsecp256k1 C-API. sign() always routes
+// through libsecp256k1 in both build modes. Single verify is real in both
+// modes, so the roundtrip tests below are not guarded and exercise the direct
+// engine when HAVE_ULTRAFAST is ON and the libsecp fallback when it is OFF:
+//   * sign__round_trip_positive: sign then verify_signature() succeeds.
+//   * sign__round_trip_negative / verify_signature__negative: a tampered hash
+//     or signature byte makes verify_signature() fail.
+
 // These vectors use hash encoding for sighash values.
 
 // scenario 1
@@ -97,6 +109,35 @@ BOOST_AUTO_TEST_CASE(secp256k1__sign__round_trip_negative__expected)
     hash[0] = 0;
 
     BOOST_REQUIRE(!verify_signature(to_chunk(point), hash, signature));
+}
+
+// Exercises the migrated normalize/canonicalize paths under both build modes.
+// Under HAVE_ULTRAFAST these route to the UltrafastSecp256k1 direct engine
+// (ufsecp::lbtc::ecdsa_signature_normalize / _serialize_compact); otherwise to
+// the libsecp256k1 C-API. signature3 is already low-s (it is the normalized
+// private form of der_signature3), so normalize_signature is idempotent and
+// leaves the value unchanged.
+BOOST_AUTO_TEST_CASE(secp256k1__normalize_signature__low_s__unchanged)
+{
+    using namespace system::ecdsa;
+    ec_signature normalized;
+
+    // signature3 is already low-s; normalize must leave it byte-identical.
+    normalize_signature(normalized, signature3);
+    BOOST_REQUIRE_EQUAL(normalized, signature3);
+}
+
+BOOST_AUTO_TEST_CASE(secp256k1__canonicalize_signature__positive__expected)
+{
+    using namespace system::ecdsa;
+    ec_signature canonical;
+
+    // Produces low-s big-endian compact form; must succeed and be deterministic.
+    BOOST_REQUIRE(canonicalize_signature(canonical, signature3));
+
+    ec_signature canonical_again;
+    BOOST_REQUIRE(canonicalize_signature(canonical_again, signature3));
+    BOOST_REQUIRE_EQUAL(canonical, canonical_again);
 }
 
 BOOST_AUTO_TEST_CASE(secp256k1__verify_signature__positive__expected)

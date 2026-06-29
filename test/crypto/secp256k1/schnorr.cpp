@@ -21,10 +21,12 @@
 BOOST_AUTO_TEST_SUITE(secp256k1_tests)
 
 // Schnorr sign+verify roundtrip.
-// sign() routes through libsecp in both build modes; verify_signature() routes
-// through the UltrafastSecp256k1 direct engine under HAVE_ULTRAFAST and through
-// libsecp otherwise. Single verify is real in both modes, so these tests are
-// not guarded.
+// Under HAVE_ULTRAFAST both sign() and verify_signature() route through the
+// UltrafastSecp256k1 direct engine (ufsecp::lbtc::*); otherwise both route
+// through libsecp256k1. Both engines are BIP-340 deterministic, so the sign
+// path is real in both modes and these tests are not guarded. The positive
+// case exercises the migrated sign path; the negative cases (tampered
+// signature, tampered hash) confirm verification rejects mismatches.
 
 const ec_secret schnorr_secret = base16_array(
     "8010b1bb119ad37d4b65a1022a314897b1b3614b345974332cb1b9582cf03536");
@@ -80,6 +82,77 @@ BOOST_AUTO_TEST_CASE(secp256k1__schnorr_sign__round_trip_negative_hash__expected
     // Verify against a different hash; verification must fail.
     hash[0] ^= 0xff;
     BOOST_REQUIRE(!verify_signature(xonly, hash, signature));
+}
+
+// verify_commitment (BIP-341 x-only tweak-add-check with a raw tweak scalar).
+// Under HAVE_ULTRAFAST this routes through the engine (lift_x even-Y internal
+// key, Q' = P + t*G via dual_scalar_mul_gen_point, x/parity compare); otherwise
+// through libsecp256k1's secp256k1_xonly_pubkey_tweak_add_check. The vector is
+// built mode-independently using libbitcoin's public ec_add (point += G*scalar):
+// the internal key is the generator's x-only (even Y, so the lift equals G), and
+// Q = G + t*G is computed with the same raw tweak scalar the check consumes.
+
+BOOST_AUTO_TEST_CASE(secp256k1__schnorr_verify_commitment__round_trip_positive__expected)
+{
+    using namespace system::schnorr;
+
+    // Internal key P = G (even Y); its x-only is the low 32 bytes of the
+    // compressed generator. lift_x of this x-only is exactly G.
+    const auto internal = array_cast<uint8_t, ec_xonly_size, 1>(
+        ec_compressed_generator);
+
+    // Raw tweak scalar t (valid, < n, non-zero).
+    const ec_secret tweak = base16_array(
+        "8010b1bb119ad37d4b65a1022a314897b1b3614b345974332cb1b9582cf03536");
+
+    // Q = P + t*G, computed via libbitcoin's public point arithmetic.
+    auto q_point = ec_compressed_generator;  // 0x02 || Gx == lift_x(P) == G
+    BOOST_REQUIRE(ec_add(q_point, tweak));
+
+    const auto tweaked = array_cast<uint8_t, ec_xonly_size, 1>(q_point);
+    const auto parity = (q_point.front() == ec_odd_sign);
+
+    BOOST_REQUIRE(verify_commitment(internal, tweak, tweaked, parity));
+}
+
+BOOST_AUTO_TEST_CASE(secp256k1__schnorr_verify_commitment__round_trip_negative_parity__expected)
+{
+    using namespace system::schnorr;
+
+    const auto internal = array_cast<uint8_t, ec_xonly_size, 1>(
+        ec_compressed_generator);
+    const ec_secret tweak = base16_array(
+        "8010b1bb119ad37d4b65a1022a314897b1b3614b345974332cb1b9582cf03536");
+
+    auto q_point = ec_compressed_generator;
+    BOOST_REQUIRE(ec_add(q_point, tweak));
+
+    const auto tweaked = array_cast<uint8_t, ec_xonly_size, 1>(q_point);
+    const auto parity = (q_point.front() == ec_odd_sign);
+
+    // Flip the parity bit; the commitment must be rejected.
+    BOOST_REQUIRE(!verify_commitment(internal, tweak, tweaked, !parity));
+}
+
+BOOST_AUTO_TEST_CASE(secp256k1__schnorr_verify_commitment__round_trip_negative_tweak__expected)
+{
+    using namespace system::schnorr;
+
+    const auto internal = array_cast<uint8_t, ec_xonly_size, 1>(
+        ec_compressed_generator);
+    const ec_secret tweak = base16_array(
+        "8010b1bb119ad37d4b65a1022a314897b1b3614b345974332cb1b9582cf03536");
+
+    auto q_point = ec_compressed_generator;
+    BOOST_REQUIRE(ec_add(q_point, tweak));
+
+    const auto tweaked = array_cast<uint8_t, ec_xonly_size, 1>(q_point);
+    const auto parity = (q_point.front() == ec_odd_sign);
+
+    // Verify against a different tweak; the commitment must be rejected.
+    auto wrong_tweak = tweak;
+    wrong_tweak[0] ^= 0xff;
+    BOOST_REQUIRE(!verify_commitment(internal, wrong_tweak, tweaked, parity));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
