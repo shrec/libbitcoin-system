@@ -78,20 +78,19 @@ arithmetic to faithfully model libbitcoin's zero-tolerant `ec_scalar` semantics
 (pubkey, signature, message hash) is public; this is correct by design, exactly as
 libsecp256k1 does for verify.
 
-**Two honestly-documented non-"direct" items (still no libsecp256k1 in ON mode).**
-The engine exposes no entrypoint for these, so they are handled in the consumer:
+**Direct batch failure reporting.** `batch::evaluate()` returns real per-row
+engine verdicts (`1`=valid, `0`=invalid, fail-closed). `batch::verify()` then
+maps those verdicts through `correlate()`/`get_failures()` and returns failing
+link ids for ECDSA and Schnorr batches, including single-signature rows and
+threshold/multisig groups.
+
+**One honestly-documented non-"direct" item (still no libsecp256k1 in ON mode).**
+The engine exposes no entrypoint for this, so it is handled in the consumer:
 - **`ecdsa::decode_signature` (lax / pre-BIP66 DER parse)** — the engine has no DER
   parser, only a strict compact parse. In ON mode this is served by an **inline pure-C++
   lax DER parser inside the consumer** — no libsecp256k1, no shim. The out-of-tree
   `src/crypto/der_parser.cpp` (which would need the libsecp256k1 C-API) is **excluded
   from the ON build**.
-- **Batch link correlation** — `batch::evaluate()` returns real per-row engine verdicts
-  (`1`=valid, `0`=invalid, fail-closed). `batch::verify()` calls
-  `correlate()`/`get_failures()` to map failing rows to link ids, but that correlation
-  pass is **not yet implemented upstream** (returns `{}` in all modes — ON and OFF alike).
-  The blocked functions are `ecdsa::batch::get_failures` and
-  `schnorr::batch::get_failures`; tests therefore assert on `evaluate()` row verdicts,
-  not on `verify()` links.
 
 #### OFF mode (`-DHAVE_ULTRAFAST=OFF`) — pure libsecp256k1 fallback
 

@@ -29,18 +29,13 @@ BOOST_AUTO_TEST_SUITE(secp256k1_tests)
 // results buffer (1 = valid, 0 = invalid); otherwise evaluate() is a stub
 // returning an empty buffer.
 //
-// IMPORTANT — what is and is not validated here:
+// IMPORTANT — what is validated here:
 //   * evaluate() is the engine verdict surface. The HAVE_ULTRAFAST-guarded
 //     assertions below check the actual per-row verdicts the direct engine
-//     produces, including detection of a tampered row. This is the real test
-//     of the column integration.
+//     produces, including detection of a tampered row.
 //   * batch::verify() additionally runs correlate()->get_failures() to map the
-//     per-row results to failing link ids. That correlation pass is NOT yet
-//     implemented upstream (its body is commented out in src/.../batch.cpp and
-//     it returns {} in every build mode). Tests therefore do NOT assert on
-//     verify()'s links_t result, because today it cannot report failures even
-//     when the engine detects them. This is a tracked blocker, reported back to
-//     Codex; it is not exercised as a success condition.
+//     per-row results to failing link ids. The HAVE_ULTRAFAST assertions prove
+//     the public batch surface reports the expected failing link id.
 //   * The single-signature primitive verify (ecdsa::verify_signature) is real
 //     in both build modes and is asserted unguarded as a baseline.
 
@@ -118,6 +113,9 @@ BOOST_AUTO_TEST_CASE(secp256k1__ecdsa_batch_evaluate__singles_all_valid__all_row
     BOOST_REQUIRE(results.at(0) != 0);
     BOOST_REQUIRE(results.at(1) != 0);
     BOOST_REQUIRE(results.at(2) != 0);
+
+    const auto failures = batch::verify(cancel, b);
+    BOOST_REQUIRE(failures.empty());
 #else
     (void)cancel;
     (void)b;
@@ -169,13 +167,16 @@ BOOST_AUTO_TEST_CASE(secp256k1__ecdsa_batch_evaluate__singles_one_tampered__row_
 
 #if defined(HAVE_ULTRAFAST)
     // Engine verdict surface: the column verify detects the tampered row 2.
-    // (This is the meaningful HAVE_ULTRAFAST assertion: a real failure verdict
-    // from the direct engine, not the stubbed verify()/get_failures path.)
     const auto results = ecdsa_batch_accessor::evaluate(cancel, b);
     BOOST_REQUIRE_EQUAL(results.size(), 3u);
     BOOST_REQUIRE(results.at(0) != 0);
     BOOST_REQUIRE(results.at(1) != 0);
     BOOST_REQUIRE(results.at(2) == 0);
+
+    // Public batch surface: correlate() maps the failed row verdict to link id 2.
+    const auto failures = batch::verify(cancel, b);
+    BOOST_REQUIRE_EQUAL(failures.size(), 1u);
+    BOOST_REQUIRE_EQUAL(failures.at(0), 2u);
 #else
     (void)cancel;
     (void)b;
@@ -192,8 +193,7 @@ BOOST_AUTO_TEST_CASE(secp256k1__ecdsa_batch_evaluate__singles_one_tampered__row_
 // evaluate() is a stub returning an empty buffer.
 //
 // As with the ECDSA cases above, tests assert on evaluate()'s per-row engine
-// verdicts, NOT on verify()'s links_t (correlate()->get_failures() is a tracked
-// upstream stub returning {} in every build mode).
+// verdicts and verify()'s public failing-link correlation.
 
 const ec_secret schnorr_batch_secret0 = base16_array(
     "8010b1bb119ad37d4b65a1022a314897b1b3614b345974332cb1b9582cf03536");
@@ -285,6 +285,9 @@ BOOST_AUTO_TEST_CASE(secp256k1__schnorr_batch_evaluate__singles_all_valid__all_r
     BOOST_REQUIRE(results.at(0) != 0);
     BOOST_REQUIRE(results.at(1) != 0);
     BOOST_REQUIRE(results.at(2) != 0);
+
+    const auto failures = batch::verify(cancel, b);
+    BOOST_REQUIRE(failures.empty());
 #else
     (void)cancel;
     (void)b;
@@ -339,13 +342,16 @@ BOOST_AUTO_TEST_CASE(secp256k1__schnorr_batch_evaluate__singles_one_tampered__ro
 
 #if defined(HAVE_ULTRAFAST)
     // Engine verdict surface: the column verify detects the tampered row 2.
-    // (This is the meaningful HAVE_ULTRAFAST assertion: a real failure verdict
-    // from the direct engine, not the stubbed verify()/get_failures path.)
     const auto results = schnorr_batch_accessor::evaluate(cancel, b);
     BOOST_REQUIRE_EQUAL(results.size(), 3u);
     BOOST_REQUIRE(results.at(0) != 0);
     BOOST_REQUIRE(results.at(1) != 0);
     BOOST_REQUIRE(results.at(2) == 0);
+
+    // Public batch surface: correlate() maps the failed row verdict to link id 2.
+    const auto failures = batch::verify(cancel, b);
+    BOOST_REQUIRE_EQUAL(failures.size(), 1u);
+    BOOST_REQUIRE_EQUAL(failures.at(0), 2u);
 #else
     (void)cancel;
     (void)b;

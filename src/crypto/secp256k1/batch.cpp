@@ -133,6 +133,16 @@ inline void push_fail(links_t& fails, const batched::link& id) NOEXCEPT
         fails.push_back(from_little_array<link_t>(id));
 }
 
+template <typename Correlates>
+links_t fail_all_links(const Correlates& rows) NOEXCEPT
+{
+    links_t fails{};
+    for (const auto& row: rows)
+        push_fail(fails, row.id);
+
+    return fails;
+}
+
 // get_failures (ecdsa)
 // ----------------------------------------------------------------------------
 
@@ -162,70 +172,58 @@ bool ecdsa::batch::meets_threshold(uint8_t signatures, uint8_t keys,
 
 // Ecdsa (single sig and standard multisig) correlation.
 // O(n) over the sig set, ~100 bytes of stack, no heap.
-links_t ecdsa::batch::get_failures(const stopper& ,
-    const data_chunk& , const batch& ) NOEXCEPT
+links_t ecdsa::batch::get_failures(const stopper& cancel,
+    const data_chunk& out, const batch& in) NOEXCEPT
 {
-    // HAVE_ULTRAFAST: per-row verdicts come from evaluate() (engine, real). The
-    // verify()->correlate()->get_failures() link-correlation pass is NOT YET
-    // IMPLEMENTED upstream (batch row metadata design unfinished). evaluate()
-    // row results are authoritative; verify() returns no link ids.
-    // Blocked function: ecdsa::batch::get_failures.
-    //
-    // Why not just un-comment: the commented body below indexes the batch
-    // directly (in[index].id / .group / .pair and in.size()) against an OLD
-    // design where `batch` was row-indexable. The current struct (see
-    // secp256k1_batch.hpp) carries no operator[] and no size(); per-row link
-    // metadata lives on the separate `correlate_t` span (in.correlates[i].id /
-    // .group / .pair). Wiring this correctly (and defining how verify() maps the
-    // out[] verdict buffer to correlate rows + groups) is the unfinished design
-    // decision, so the body is left stubbed pending the upstream metadata model.
-    ////BC_ASSERT(out.size() == in.size());
-    ////
-    ////size_t group{};
-    ////links_t fails{};
-    ////for (auto index = one; index <= in.size() && !cancel; ++index)
-    ////{
-    ////    // Find the start of the next group (or end).
-    ////    if ((index != in.size()) &&
-    ////        (in[index].id == in[group].id) &&
-    ////        (in[index].group == in[group].group))
-    ////        continue;
-    ////
-    ////    // Short-circuit single signature.
-    ////    const auto second = add1(group);
-    ////    const auto single = (index == second);
-    ////    if (single)
-    ////    {
-    ////        if (!to_bool(out.at(group)))
-    ////            push_fail(fails, in[group].id);
-    ////
-    ////        group = index;
-    ////        continue;
-    ////    }
-    ////
-    ////    // Build matrix and determine effective m/n from (sig, key) pairs.
-    ////    multisig_matrix successes{};
-    ////    uint8_t max_sig{}, max_key{};
-    ////
-    ////    for (auto row = group; row < index; ++row)
-    ////    {
-    ////        const auto [sig, key] = unpack_word<uint8_t>(in[row].pair);
-    ////        if (to_bool(out.at(row)))
-    ////            set_right_into(successes.at(sig), key);
-    ////
-    ////        max_sig = greater(sig, max_sig);
-    ////        max_key = greater(key, max_key);
-    ////    }
-    ////
-    ////    // Evaluate op_checkmultisig success.
-    ////    if (!meets_threshold(add1(max_sig), add1(max_key), successes))
-    ////        push_fail(fails, in[group].id);
-    ////
-    ////    group = index;
-    ////}
-    ////
-    ////return fails;
-    return {};
+    const auto rows = in.correlates;
+    BC_ASSERT(out.size() == rows.size());
+    if (out.size() != rows.size())
+        return fail_all_links(rows);
+
+    size_t group{};
+    links_t fails{};
+    for (auto index = one; index <= rows.size() && !cancel; ++index)
+    {
+        // Find the start of the next group (or end).
+        if ((index != rows.size()) &&
+            (rows[index].id == rows[group].id) &&
+            (rows[index].group == rows[group].group))
+            continue;
+
+        // Short-circuit single signature.
+        const auto second = add1(group);
+        const auto single = (index == second);
+        if (single)
+        {
+            if (!to_bool(out.at(group)))
+                push_fail(fails, rows[group].id);
+
+            group = index;
+            continue;
+        }
+
+        // Build matrix and determine effective m/n from (sig, key) pairs.
+        multisig_matrix successes{};
+        uint8_t max_sig{}, max_key{};
+
+        for (auto row = group; row < index; ++row)
+        {
+            const auto [sig, key] = unpack_word<uint8_t>(rows[row].pair);
+            if (to_bool(out.at(row)))
+                set_right_into(successes.at(sig), key);
+
+            max_sig = greater(sig, max_sig);
+            max_key = greater(key, max_key);
+        }
+
+        // Evaluate op_checkmultisig success.
+        if (!meets_threshold(add1(max_sig), add1(max_key), successes))
+            push_fail(fails, rows[group].id);
+
+        group = index;
+    }
+
+    return fails;
 }
 
 // get_failures (schnorr)
@@ -258,67 +256,54 @@ bool schnorr::batch::meets_threshold(uint8_t category, size_t successes,
 
 // Schnorr (single sig and threshold sigs) correlation.
 // O(n) over the sig set, ~100 bytes of stack, no heap.
-links_t schnorr::batch::get_failures(const stopper& ,
-    const data_chunk& , const batch& ) NOEXCEPT
+links_t schnorr::batch::get_failures(const stopper& cancel,
+    const data_chunk& out, const batch& in) NOEXCEPT
 {
-    // HAVE_ULTRAFAST: per-row verdicts come from evaluate() (engine, real). The
-    // verify()->correlate()->get_failures() link-correlation pass is NOT YET
-    // IMPLEMENTED upstream (batch row metadata design unfinished). evaluate()
-    // row results are authoritative; verify() returns no link ids.
-    // Blocked function: schnorr::batch::get_failures.
-    //
-    // Why not just un-comment: the commented body below indexes the batch
-    // directly (in[index].id / .group and in[first].pair / .category, plus
-    // in.size()) against an OLD design where `batch` was row-indexable. The
-    // current struct (see secp256k1_batch.hpp) carries no operator[] and no
-    // size(); per-row threshold metadata lives on the separate `correlate_t`
-    // span (in.correlates[i].category / .pair / .group / .id). Wiring this
-    // correctly (and defining how verify() maps the out[] verdict buffer to
-    // correlate rows + groups) is the unfinished design decision, so the body
-    // is left stubbed pending the upstream metadata model.
-    ////BC_ASSERT(out.size() == in.size());
-    ////
-    ////size_t group{};
-    ////links_t fails{};
-    ////for (auto index = one; index <= in.size() && !cancel; ++index)
-    ////{
-    ////    // Find the start of the next group (or end).
-    ////    if ((index != in.size()) &&
-    ////        (in[index].id == in[group].id) &&
-    ////        (in[index].group == in[group].group))
-    ////        continue;
-    ////
-    ////    // Short-circuit single signature.
-    ////    const auto first = group;
-    ////    const auto second = add1(group);
-    ////    const auto single = (index == second);
-    ////    if (single)
-    ////    {
-    ////        if (!to_bool(out.at(group)))
-    ////            push_fail(fails, in[group].id);
-    ////
-    ////        group = index;
-    ////        continue;
-    ////    }
-    ////
-    ////    // Count successes in the group.
-    ////    size_t successes{};
-    ////    for (auto row = group; row < index; ++row)
-    ////        if (to_bool(out.at(row)))
-    ////            ++successes;
-    ////
-    ////    // Get min and max from first two rows (max only for op_within).
-    ////    const auto minimum = in[first].pair;
-    ////    const auto maximum = in[second].pair;
-    ////    const auto category = in[first].category;
-    ////    if (!meets_threshold(category, successes, minimum, maximum))
-    ////        push_fail(fails, in[group].id);
-    ////
-    ////    group = index;
-    ////}
-    ////
-    ////return fails;
-    return {};
+    const auto rows = in.correlates;
+    BC_ASSERT(out.size() == rows.size());
+    if (out.size() != rows.size())
+        return fail_all_links(rows);
+
+    size_t group{};
+    links_t fails{};
+    for (auto index = one; index <= rows.size() && !cancel; ++index)
+    {
+        // Find the start of the next group (or end).
+        if ((index != rows.size()) &&
+            (rows[index].id == rows[group].id) &&
+            (rows[index].group == rows[group].group))
+            continue;
+
+        // Short-circuit single signature.
+        const auto first = group;
+        const auto second = add1(group);
+        const auto single = (index == second);
+        if (single)
+        {
+            if (!to_bool(out.at(group)))
+                push_fail(fails, rows[group].id);
+
+            group = index;
+            continue;
+        }
+
+        // Count successes in the group.
+        size_t successes{};
+        for (auto row = group; row < index; ++row)
+            if (to_bool(out.at(row)))
+                ++successes;
+
+        // Get min and max from first two rows (max only for op_within).
+        const auto minimum = rows[first].pair;
+        const auto maximum = rows[second].pair;
+        const auto category = rows[first].category;
+        if (!meets_threshold(category, successes, minimum, maximum))
+            push_fail(fails, rows[group].id);
+
+        group = index;
+    }
+
+    return fails;
 }
 
 // get_match (silent)
